@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <svg width="800" height="500" style="border: 1px solid black;">
+    <!-- Global coords crosshair -->
+    <circle cx="500" cy="300" r="10" fill="none" stroke="red" />
+    <line x1="490" y1="300" x2="510" y2="300" stroke="red" />
+    <line x1="500" y1="290" x2="500" y2="310" stroke="red" />
+
+    <!-- Group with transform -->
+    <g transform="translate(50, 60) rotate(45, 400, 250) scale(1.5)">
+      <!-- Local coords point mapped from global (500, 300) -->
+      <!-- Let's calculate using my formula: -->
+      <!-- gx=500, gy=300, Tx=50, Ty=60, A=45, S=1.5 -->
+      <!-- rx = 500-50=450, ry = 300-60=240 -->
+      <!-- cos(-45) = 0.707, sin(-45) = -0.707 -->
+      <!-- sx = 400 + (450-400)*0.707 - (240-250)*(-0.707) = 400 + 50*0.707 - 10*0.707 = 400 + 35.35 - 7.07 = 428.28 -->
+      <!-- sy = 250 + (450-400)*(-0.707) + (240-250)*0.707 = 250 - 35.35 - 7.07 = 207.58 -->
+      <!-- px = 428.28 / 1.5 = 285.52 -->
+      <!-- py = 207.58 / 1.5 = 138.38 -->
+      <circle cx="285.52" cy="138.38" r="5" fill="blue" />
+    </g>
+  </svg>
+</body>
+</html>

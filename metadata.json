@@ -1,0 +1,6 @@
+{
+  "name": "Sistema Radiográfico Dental",
+  "description": "Módulo integral para consultorio radiográfico dental: gestión de radiografías intraorales y extraorales, análisis cefalométrico, fotografía clínica, tomografía Cone Beam y editor de imágenes con herramientas de medición.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
