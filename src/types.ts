@@ -48,6 +48,8 @@ export interface Annotation {
   x?: number; // For text/marker location
   y?: number;
   lengthMm?: number; // For distance line
+  isCalibration?: boolean;
+  targetCalibrationMm?: number;
 }
 
 export interface CephalometricModel {

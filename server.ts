@@ -17,10 +17,10 @@ async function startServer() {
   // AI Cephalometric Landmark Automatic Detection Route
   app.post("/api/ai/cephalometric-landmarks", async (req, res) => {
     try {
-      const { imageUrl, imageBase64, patientName, studySubtype } = req.body;
+      const { imageUrl, imageBase64, patientName, studySubtype, userLearnedPreferences } = req.body;
       const apiKey = process.env.GEMINI_API_KEY;
 
-      const fallbackLandmarks = {
+      let fallbackLandmarks: Record<string, any> = {
         S: { x: 265, y: 140, confidence: 0.98, label: 'Silla Turca (S)', desc: 'Centro de la silla turca del hueso esfenoides' },
         N: { x: 425, y: 115, confidence: 0.97, label: 'Nasion (N)', desc: 'Punto más anterior de la sutura frontonasal' },
         Or: { x: 380, y: 170, confidence: 0.94, label: 'Orbitario (Or)', desc: 'Punto más inferior del reborde orbitario' },
@@ -46,12 +46,33 @@ async function startServer() {
         Pogs: { x: 420, y: 375, confidence: 0.96, label: 'Pogonion Blando (Pogs)', desc: 'Punto más prominente del tejido blando del mentón' }
       };
 
+      // Apply user-trained learned preferences if provided
+      if (userLearnedPreferences && typeof userLearnedPreferences === 'object') {
+        Object.keys(userLearnedPreferences).forEach((k) => {
+          const pt = userLearnedPreferences[k];
+          if (pt && typeof pt.x === 'number' && typeof pt.y === 'number') {
+            fallbackLandmarks[k] = {
+              x: Math.round(pt.x),
+              y: Math.round(pt.y),
+              confidence: 0.99,
+              label: fallbackLandmarks[k]?.label || k,
+              desc: 'Punto calibrado mediante entrenamiento manual previo del especialista',
+              learnedFromUser: true
+            };
+          }
+        });
+      }
+
       if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+        const isCalibrated = Boolean(userLearnedPreferences && Object.keys(userLearnedPreferences).length > 0);
         return res.json({
           landmarks: fallbackLandmarks,
-          confidenceAverage: 0.95,
-          summary: "Propuesta de ubicación de puntos cefalométricos generada por modelo anatómico de visión profunda.",
-          isFallback: true
+          confidenceAverage: isCalibrated ? 0.98 : 0.95,
+          summary: isCalibrated 
+            ? "Puntos cefalométricos adaptados según el modelo de aprendizaje manual y criterio del especialista."
+            : "Propuesta de ubicación de puntos cefalométricos generada por modelo anatómico de visión profunda.",
+          isFallback: true,
+          learnedFromUser: isCalibrated
         });
       }
 
@@ -69,6 +90,7 @@ async function startServer() {
       const prompt = `Analiza detalladamente esta radiografía lateral de cráneo para ortodoncia del paciente ${patientName || 'Paciente'}.
 Localiza con alta precisión anatómica las coordenadas X e Y de los 23 puntos cefalométricos clave dentro de un lienzo de 800px de ancho por 500px de alto.
 Puntos a detectar: S, N, Or, Po, A, B, Pog, Gn, Me, Go, Ba, ANS, PNS, U1t, U1r, L1t, L1r, OcA, OcP, Ns, Ls, Li, Pogs.
+${userLearnedPreferences ? `\nIMPORTANTE: El especialista ha entrenado el modelo con sus puntos de referencia manuales de alta precisión: ${JSON.stringify(userLearnedPreferences)}. Calibra la detección respetando este criterio anatómico.` : ''}
 
 Responde ÚNICAMENTE en formato JSON estricto con el siguiente esquema:
 {

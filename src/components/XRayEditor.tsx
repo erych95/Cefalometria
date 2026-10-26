@@ -71,6 +71,13 @@ import {
   BarChart2,
   Stethoscope,
   Search,
+  Crosshair,
+  CheckCircle,
+  MoveVertical,
+  MoveHorizontal,
+  ArrowUpDown,
+  Brain,
+  GraduationCap,
   X
 } from 'lucide-react';
 import {
@@ -206,12 +213,15 @@ const calculateAgeYearsMonths = (birthDateStr: string, analysisDateStr: string) 
   };
 };
 
+export const CEPH_LANDMARKS_ORDER: string[] = [
+  'S', 'N', 'A', 'B', 'D', 'Po', 'Or', 'Go', 'Me', 'Gn', 'Pog', 'ANS', 'PNS', 'L', 'E', 'U1t', 'U1r', 'L1t', 'L1r', 'OcA', 'OcP', 'Pogs', 'Ns', 'Ls', 'Li'
+];
+
 const getMergedLandmarks = (savedPts?: Record<string, { x: number; y: number }>) => {
-  const merged: Record<string, { x: number; y: number }> = {};
-  Object.keys(DEFAULT_LANDMARKS).forEach((key) => {
-    merged[key] = savedPts?.[key] ? { ...savedPts[key] } : { x: DEFAULT_LANDMARKS[key].x, y: DEFAULT_LANDMARKS[key].y };
-  });
-  return merged;
+  if (savedPts && Object.keys(savedPts).length > 0) {
+    return { ...savedPts };
+  }
+  return {};
 };
 
 export default function XRayEditor({ study, patientName, onSave, isDarkMode = true }: XRayEditorProps) {
@@ -371,6 +381,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
 
   // Advanced Ruler Selection, Point Joining, & Range Calibration States
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+  const [directMmInput, setDirectMmInput] = useState<string>('');
+  const [isVerticalLocked, setIsVerticalLocked] = useState<boolean>(false);
   const [draggingHandle, setDraggingHandle] = useState<'endpoint1' | 'endpoint2' | 'body' | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [pixelsPerMm, setPixelsPerMm] = useState<number>(10.0); // Default scale: 10px = 1mm
@@ -391,6 +403,74 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
   const [calibrationInputValue, setCalibrationInputValue] = useState<string>('10.0');
   const [measurementsVisible, setMeasurementsVisible] = useState<boolean>(true);
   const [hoveredLandmarkKey, setHoveredLandmarkKey] = useState<string | null>(null);
+
+  // 2-Point Scale Calibration Tool States
+  const [isCalibrating2Points, setIsCalibrating2Points] = useState<boolean>(false);
+  const [calib2Points, setCalib2Points] = useState<{ x: number; y: number }[]>([]);
+  const [show2PointModal, setShow2PointModal] = useState<boolean>(false);
+  const [calibKnownMm, setCalibKnownMm] = useState<string>('10.0');
+
+  // Start 2-Point Calibration workflow
+  const handleStart2PointCalibration = () => {
+    setIsCalibrating2Points(true);
+    setCalib2Points([]);
+    setActiveTool('select');
+    setEditorMessage('🎯 MODO CALIBRACIÓN 2 PUNTOS: Haga clic en el PRIMER PUNTO de la estructura conocida (ej. Marca 0 mm del Apoyafrente).');
+  };
+
+  // Apply 2-Point Calibration
+  const handleApply2PointCalibration = () => {
+    const knownMm = parseFloat(calibKnownMm);
+    if (isNaN(knownMm) || knownMm <= 0) {
+      setEditorMessage('Atención: Ingrese un valor de milímetros válido mayor a 0.');
+      return;
+    }
+
+    if (calib2Points.length < 2) return;
+
+    const [pt1, pt2] = calib2Points;
+    const pxDistance = Math.hypot(pt2.x - pt1.x, pt2.y - pt1.y);
+    if (pxDistance <= 0) return;
+
+    const newPxPerMm = pxDistance / knownMm;
+    setPixelsPerMm(newPxPerMm);
+
+    // Create or update 2-point reference ruler
+    const calibAnnId = 'ann-2point-calibration';
+    const newCalibAnn: Annotation = {
+      id: calibAnnId,
+      type: 'line',
+      color: '#00f0ff',
+      x1: pt1.x,
+      y1: pt1.y,
+      x2: pt2.x,
+      y2: pt2.y,
+      lengthMm: knownMm,
+      targetCalibrationMm: knownMm,
+      text: 'Calibración 2P',
+      isCalibration: true
+    };
+
+    const filteredAnns = annotations.filter((a) => a.id !== calibAnnId && a.id !== 'ann-forehead-ruler');
+    const updatedAnns = [...filteredAnns, newCalibAnn].map((ann) => {
+      if (ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        const pxD = Math.hypot(ann.x2 - ann.x1, (ann.y2 ?? 0) - (ann.y1 ?? 0));
+        return {
+          ...ann,
+          lengthMm: Math.round((pxD / newPxPerMm) * 10) / 10
+        };
+      }
+      return ann;
+    });
+
+    setAnnotations(updatedAnns);
+    setSelectedAnnotationId(calibAnnId);
+    saveToHistory(updatedAnns, undefined, undefined, undefined);
+    setShow2PointModal(false);
+    setCalib2Points([]);
+    setIsCalibrated(true);
+    setEditorMessage(`📐 ¡Escala Calibrada por 2 Puntos con Éxito! 1 mm = ${Math.round(newPxPerMm * 10) / 10} px. Todas las reglas miden los mm reales.`);
+  };
 
   // Magnetic Point Snapping Helper
   const findSnapTarget = (x: number, y: number, snapRadius = 18) => {
@@ -505,7 +585,7 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     const newPxPerMm = pxDistance / targetMm;
     setPixelsPerMm(newPxPerMm);
 
-    // Recalculate lengthMm for all line annotations
+    // Recalculate lengthMm for all line annotations based on newly established scale
     const updatedAnns = annotations.map((ann) => {
       if (ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
         const dx = ann.x2 - ann.x1;
@@ -523,7 +603,7 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     saveToHistory(updatedAnns, undefined, undefined, undefined);
     setShowCalibrationModal(false);
     setIsCalibrated(true);
-    setEditorMessage(`📐 ¡Imagen Calibrada con Éxito! Escala: 1 mm = ${Math.round(newPxPerMm * 10) / 10} px. Ahora puede continuar con el paso 2.`);
+    setEditorMessage(`📐 ¡Imagen Calibrada con Éxito! Escala: 1 mm = ${Math.round(newPxPerMm * 10) / 10} px. Las medidas lineales se mantendrán inalterables.`);
   };
 
   // Automatically place calibration ruler on the forehead support of the lateral x-ray
@@ -532,23 +612,161 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     const rulerAnn: Annotation = {
       id: rulerId,
       type: 'line',
-      color: '#eab308', // Gold/Yellow
+      color: '#00f0ff', // Bright cyan for calibration
       x1: 412,
       y1: 15,
       x2: 412,
-      y2: 115, // 100 pixels = 10mm (with 10px = 1mm default)
+      y2: 115, // 100 pixels
       lengthMm: 10.0,
-      text: 'Calibración Frente'
+      text: 'Calibración Frente',
+      isCalibration: true,
+      targetCalibrationMm: 10.0
     };
+
+    const pxDist = Math.hypot(rulerAnn.x2 - rulerAnn.x1, (rulerAnn.y2 ?? 0) - (rulerAnn.y1 ?? 0));
+    const newPxPerMm = pxDist / 10.0;
+    setPixelsPerMm(newPxPerMm);
 
     // Filter out existing forehead-ruler to prevent duplicates
     const nextAnns = [...annotations.filter((a) => a.id !== rulerId), rulerAnn];
     setAnnotations(nextAnns);
     setSelectedAnnotationId(rulerId);
-    setPixelsPerMm(10.0); // Reset to standard base line (10px = 1mm)
 
     saveToHistory(nextAnns, undefined, undefined, undefined);
-    setEditorMessage('🎯 Regla posicionada exactamente sobre el calibrador físico de la frente (10 mm) según especificaciones clínicas.');
+    setEditorMessage('🎯 Regla de calibración (10.0 mm) posicionada sobre el apoyafrente. Arrastre sus extremos sobre el calibrador de la placa para fijar la escala.');
+  };
+
+  // Align selected ruler / line to 100% strictly vertical (90 degrees)
+  const handleAlignSelectedVertical = () => {
+    if (!selectedAnnotationId) return;
+    const activeScale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+    let found = false;
+    const updated = annotations.map((ann) => {
+      if (ann.id === selectedAnnotationId && ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        found = true;
+        const avgX = Math.round((ann.x1 + ann.x2) / 2);
+        const dy = Math.abs((ann.y2 ?? 0) - (ann.y1 ?? 0));
+        const mmDist = Math.round((dy / activeScale) * 10) / 10;
+        return {
+          ...ann,
+          x1: avgX,
+          x2: avgX,
+          lengthMm: mmDist
+        };
+      }
+      return ann;
+    });
+
+    if (found) {
+      setAnnotations(updated);
+      saveToHistory(updated, undefined, undefined, undefined);
+      setEditorMessage('↕ Regla alineada perfectamente en vertical (90°).');
+      setTimeout(() => setEditorMessage(null), 3000);
+    }
+  };
+
+  // Align selected ruler / line to 100% strictly horizontal (0 degrees)
+  const handleAlignSelectedHorizontal = () => {
+    if (!selectedAnnotationId) return;
+    const activeScale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+    let found = false;
+    const updated = annotations.map((ann) => {
+      if (ann.id === selectedAnnotationId && ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        found = true;
+        const avgY = Math.round(((ann.y1 ?? 0) + (ann.y2 ?? 0)) / 2);
+        const dx = Math.abs(ann.x2 - ann.x1);
+        const mmDist = Math.round((dx / activeScale) * 10) / 10;
+        return {
+          ...ann,
+          y1: avgY,
+          y2: avgY,
+          lengthMm: mmDist
+        };
+      }
+      return ann;
+    });
+
+    if (found) {
+      setAnnotations(updated);
+      saveToHistory(updated, undefined, undefined, undefined);
+      setEditorMessage('↔ Regla alineada perfectamente en horizontal (0°).');
+      setTimeout(() => setEditorMessage(null), 3000);
+    }
+  };
+
+  // Adjust selected ruler length incrementally in millimeters (e.g. ±0.1 mm or ±1.0 mm)
+  const handleStepRulerLength = (deltaMm: number) => {
+    if (!selectedAnnotationId) return;
+    const activeScale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+
+    let updatedMm = 0;
+    const updatedAnns = annotations.map((ann) => {
+      if (ann.id === selectedAnnotationId && ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        const dx = ann.x2 - ann.x1;
+        const dy = (ann.y2 ?? 0) - (ann.y1 ?? 0);
+        const currentLenPx = Math.hypot(dx, dy);
+        const currentMm = ann.lengthMm !== undefined ? ann.lengthMm : currentLenPx / activeScale;
+        const newMm = Math.max(0.1, Math.round((currentMm + deltaMm) * 10) / 10);
+        updatedMm = newMm;
+
+        // Direction vectors
+        const ux = currentLenPx > 0.001 ? dx / currentLenPx : 0;
+        const uy = currentLenPx > 0.001 ? dy / currentLenPx : 1;
+
+        const newLenPx = newMm * activeScale;
+        const newX2 = ann.x1 + ux * newLenPx;
+        const newY2 = (ann.y1 ?? 0) + uy * newLenPx;
+
+        return {
+          ...ann,
+          x2: Math.round(newX2 * 10) / 10,
+          y2: Math.round(newY2 * 10) / 10,
+          lengthMm: newMm
+        };
+      }
+      return ann;
+    });
+
+    setAnnotations(updatedAnns);
+    setDirectMmInput(updatedMm.toString());
+    saveToHistory(updatedAnns, undefined, undefined, undefined);
+    setEditorMessage(`📏 Medida ajustada a ${updatedMm} mm`);
+    setTimeout(() => setEditorMessage(null), 2000);
+  };
+
+  // Set selected ruler exact physical length in millimeters (e.g. user typed 10.0 or 5.2 mm)
+  const handleSetSelectedRulerLength = (targetMm: number) => {
+    if (!selectedAnnotationId || isNaN(targetMm) || targetMm <= 0) return;
+    const activeScale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+    const sanitizedMm = Math.max(0.1, Math.round(targetMm * 10) / 10);
+
+    const updatedAnns = annotations.map((ann) => {
+      if (ann.id === selectedAnnotationId && ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        const dx = ann.x2 - ann.x1;
+        const dy = (ann.y2 ?? 0) - (ann.y1 ?? 0);
+        const currentLenPx = Math.hypot(dx, dy);
+
+        // Direction vectors (default to vertical if 0px)
+        const ux = currentLenPx > 0.001 ? dx / currentLenPx : 0;
+        const uy = currentLenPx > 0.001 ? dy / currentLenPx : 1;
+
+        const newLenPx = sanitizedMm * activeScale;
+        const newX2 = ann.x1 + ux * newLenPx;
+        const newY2 = (ann.y1 ?? 0) + uy * newLenPx;
+
+        return {
+          ...ann,
+          x2: Math.round(newX2 * 10) / 10,
+          y2: Math.round(newY2 * 10) / 10,
+          lengthMm: sanitizedMm
+        };
+      }
+      return ann;
+    });
+
+    setAnnotations(updatedAnns);
+    setDirectMmInput(sanitizedMm.toString());
+    saveToHistory(updatedAnns, undefined, undefined, undefined);
   };
 
   // Sidebar Collapse state
@@ -649,6 +867,24 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
   });
   const [draggingLandmark, setDraggingLandmark] = useState<string | null>(null);
 
+  // Manual Landmark Placement Mode & AI Continuous Learning States
+  const [isManualPlacing, setIsManualPlacing] = useState<boolean>(false);
+  const [hasLearnedModel, setHasLearnedModel] = useState<boolean>(() => {
+    try {
+      return !!localStorage.getItem('ceph_learned_landmarks');
+    } catch {
+      return false;
+    }
+  });
+  const [learnedModelDate, setLearnedModelDate] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('ceph_learned_date');
+    } catch {
+      return null;
+    }
+  });
+  const [showLearnedModal, setShowLearnedModal] = useState<boolean>(false);
+
   // AI Cephalometric Landmark Auto-Detection States
   const [isAIDetectingLandmarks, setIsAIDetectingLandmarks] = useState<boolean>(false);
   const [aiLandmarksResult, setAiLandmarksResult] = useState<{
@@ -656,6 +892,7 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     confidenceAverage?: number;
     summary?: string;
     isFallback?: boolean;
+    trainedModelApplied?: boolean;
   } | null>(null);
   const [showAILandmarkProposal, setShowAILandmarkProposal] = useState<boolean>(false);
   const [showAILoadBanner, setShowAILoadBanner] = useState<boolean>(() => {
@@ -665,11 +902,65 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     return cat === 'cefalometrico' || sub.includes('cefalométrica') || sub.includes('lateral');
   });
 
-  // Handler to run AI cephalometric landmark auto-detection
+  // Handler to start or toggle manual placement mode
+  const handleStartManualPlacement = () => {
+    setIsManualPlacing(true);
+    // If activeGuideLandmarkKey is not placed yet, pick first unplaced or first in list
+    const unplacedKey = CEPH_LANDMARKS_ORDER.find((k) => !landmarks[k]) || CEPH_LANDMARKS_ORDER[0];
+    setActiveGuideLandmarkKey(unplacedKey);
+    setShowPointGuideWindow(true);
+    setEditorMessage(`🎯 Modo Manual Activado: Haz clic en la radiografía para colocar el Punto [${unplacedKey}].`);
+  };
+
+  // Handler to clear all landmarks so user can place manually from scratch
+  const handleClearAllLandmarks = () => {
+    setLandmarks({});
+    setIsManualPlacing(true);
+    setActiveGuideLandmarkKey('S');
+    setShowPointGuideWindow(true);
+    setEditorMessage('🧹 Puntos limpiados. Haz clic en la radiografía para colocar el Punto S (Silla Turca).');
+  };
+
+  // Handler to save manual landmarks into AI learned preferences
+  const handleSaveAILearningModel = () => {
+    const placedCount = Object.keys(landmarks).length;
+    if (placedCount < 3) {
+      setEditorMessage('⚠️ Se requieren al menos 3 puntos colocados para registrar el criterio de aprendizaje IA.');
+      return;
+    }
+
+    try {
+      const now = new Date().toLocaleString('es-ES', {
+        dateStyle: 'short',
+        timeStyle: 'short'
+      });
+      localStorage.setItem('ceph_learned_landmarks', JSON.stringify(landmarks));
+      localStorage.setItem('ceph_learned_date', now);
+      setHasLearnedModel(true);
+      setLearnedModelDate(now);
+      setShowLearnedModal(true);
+      setEditorMessage(`🧠 ¡Criterio anatómico guardado! La IA ha registrado tus ${placedCount} puntos manuales como referencia de entrenamiento.`);
+    } catch (e) {
+      console.error('Error saving learned preferences to localStorage:', e);
+      setEditorMessage('Error al guardar el aprendizaje en el almacenamiento local.');
+    }
+  };
+
+  // Handler to run AI cephalometric landmark auto-detection (incorporating learned manual preferences)
   const handleRunAILandmarkDetection = async (isManualCall = true) => {
     setIsAIDetectingLandmarks(true);
-    setEditorMessage('✨ La IA está analizando la radiografía lateral y estimando la posición de los puntos cefalométricos...');
+    setEditorMessage('✨ La IA está analizando la radiografía lateral considerando tu calibración manual aprendida...');
     setShowAILoadBanner(false);
+
+    let learnedPrefs: Record<string, { x: number; y: number }> | undefined = undefined;
+    try {
+      const saved = localStorage.getItem('ceph_learned_landmarks');
+      if (saved) {
+        learnedPrefs = JSON.parse(saved);
+      }
+    } catch (e) {
+      console.warn('Could not load learned preferences for AI detection:', e);
+    }
 
     try {
       const res = await fetch('/api/ai/cephalometric-landmarks', {
@@ -678,7 +969,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
         body: JSON.stringify({
           imageUrl: currentImageUrl,
           patientName: resolvedPatientName,
-          studySubtype: study.subtype
+          studySubtype: study.subtype,
+          userLearnedPreferences: learnedPrefs
         })
       });
 
@@ -687,7 +979,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
         setAiLandmarksResult(data);
         setShowAILandmarkProposal(true);
         const confPercent = Math.round((data.confidenceAverage || 0.95) * 100);
-        setEditorMessage(`✨ Propuesta IA generada con ${confPercent}% de confianza anatómica. Revisa y confirma los puntos.`);
+        const learnedNotice = data.trainedModelApplied || learnedPrefs ? ' (🧠 Calibrado con tu Criterio Manual)' : '';
+        setEditorMessage(`✨ Propuesta IA generada con ${confPercent}% de precisión${learnedNotice}. Revisa y confirma los puntos.`);
       } else {
         setEditorMessage('No se pudo procesar la autodetección IA. Puedes ubicar los puntos manualmente.');
       }
@@ -1238,6 +1531,45 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     };
   }, []);
 
+  // Sync direct mm input field when selected annotation changes
+  useEffect(() => {
+    if (selectedAnnotationId) {
+      const selAnn = annotations.find((a) => a.id === selectedAnnotationId && a.type === 'line');
+      if (selAnn) {
+        const activeScale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+        const mm = selAnn.lengthMm !== undefined
+          ? selAnn.lengthMm
+          : Math.round((Math.hypot((selAnn.x2 ?? 0) - (selAnn.x1 ?? 0), ((selAnn.y2 ?? 0) - (selAnn.y1 ?? 0))) / activeScale) * 10) / 10;
+        setDirectMmInput(mm.toString());
+      }
+    }
+  }, [selectedAnnotationId, annotations, pixelsPerMm]);
+
+  // Keyboard shortcut listener for ArrowUp / ArrowDown precision measurement tuning
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeElem = document.activeElement;
+      const isInputFocused = activeElem && (activeElem.tagName === 'INPUT' || activeElem.tagName === 'TEXTAREA');
+      if (isInputFocused) return;
+
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        if (!selectedAnnotationId) return;
+        const selAnn = annotations.find((a) => a.id === selectedAnnotationId && a.type === 'line');
+        if (!selAnn) return;
+
+        e.preventDefault();
+        const step = e.shiftKey ? 1.0 : 0.1;
+        const delta = e.key === 'ArrowUp' ? step : -step;
+        handleStepRulerLength(delta);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectedAnnotationId, annotations, pixelsPerMm]);
+
   const toggleFullscreen = () => {
     const element = document.getElementById('unified-diagnostic-workstation');
     if (!element) return;
@@ -1289,6 +1621,45 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     }
   };
 
+  // Helper for magnetic orthogonal (vertical / horizontal) locking
+  const snapOrthogonal = (
+    originX: number,
+    originY: number,
+    targetX: number,
+    targetY: number,
+    forceVertical: boolean = false,
+    forceOrtho: boolean = false
+  ): { x: number; y: number; isVertical: boolean; isHorizontal: boolean } => {
+    if (forceVertical) {
+      return { x: originX, y: targetY, isVertical: true, isHorizontal: false };
+    }
+
+    const dx = targetX - originX;
+    const dy = targetY - originY;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    if (forceOrtho) {
+      if (absDx < absDy) {
+        return { x: originX, y: targetY, isVertical: true, isHorizontal: false };
+      } else {
+        return { x: targetX, y: originY, isVertical: false, isHorizontal: true };
+      }
+    }
+
+    // Magnetic Vertical Auto-Snap (threshold 22px or within ~22 degrees of vertical)
+    if (absDx <= 22 || (absDy > 20 && absDx / absDy < 0.40)) {
+      return { x: originX, y: targetY, isVertical: true, isHorizontal: false };
+    }
+
+    // Magnetic Horizontal Auto-Snap
+    if (absDy <= 22 || (absDx > 20 && absDy / absDx < 0.40)) {
+      return { x: targetX, y: originY, isVertical: false, isHorizontal: true };
+    }
+
+    return { x: targetX, y: targetY, isVertical: false, isHorizontal: false };
+  };
+
   // Mouse interaction router
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
     e.preventDefault();
@@ -1302,50 +1673,74 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     const coords = getCoordinates(e);
     const tCoords = getTracingsCoords(coords);
 
-    // Check handle or ruler selection in select / line tool modes
-    if (activeTool === 'select' || activeTool === 'line') {
-      // 1. Check if clicking on handle 1 or handle 2 of currently selected annotation
-      if (selectedAnnotationId) {
-        const selAnn = annotations.find((a) => a.id === selectedAnnotationId);
-        if (selAnn && selAnn.type === 'line' && selAnn.x1 !== undefined && selAnn.x2 !== undefined) {
-          const d1 = Math.hypot(selAnn.x1 - tCoords.x, (selAnn.y1 ?? 0) - tCoords.y);
-          const d2 = Math.hypot(selAnn.x2 - tCoords.x, (selAnn.y2 ?? 0) - tCoords.y);
-          if (d1 < 16) {
-            setDraggingHandle('endpoint1');
-            return;
-          }
-          if (d2 < 16) {
-            setDraggingHandle('endpoint2');
-            return;
-          }
+    // PRIORITARY: Check if clicking near endpoint 1 or endpoint 2 of ANY line/ruler annotation (hit radius 22px)
+    for (const ann of annotations) {
+      if (ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        const d1 = Math.hypot(ann.x1 - tCoords.x, (ann.y1 ?? 0) - tCoords.y);
+        const d2 = Math.hypot(ann.x2 - tCoords.x, (ann.y2 ?? 0) - tCoords.y);
+        if (d1 < 22) {
+          setSelectedAnnotationId(ann.id);
+          setDraggingHandle('endpoint1');
+          return;
+        }
+        if (d2 < 22) {
+          setSelectedAnnotationId(ann.id);
+          setDraggingHandle('endpoint2');
+          return;
         }
       }
+    }
 
-      // 2. Check if clicking on any ruler line body to select it
-      const clickedLineAnn = annotations.find((ann) => {
-        if (ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
-          const x1 = ann.x1, y1 = ann.y1 ?? 0, x2 = ann.x2, y2 = ann.y2 ?? 0;
-          const A = tCoords.x - x1, B = tCoords.y - y1, C = x2 - x1, D = y2 - y1;
-          const dot = A * C + B * D;
-          const lenSq = C * C + D * D;
-          let param = -1;
-          if (lenSq !== 0) param = dot / lenSq;
-          let xx, yy;
-          if (param < 0) { xx = x1; yy = y1; }
-          else if (param > 1) { xx = x2; yy = y2; }
-          else { xx = x1 + param * C; yy = y1 + param * D; }
-          const dist = Math.hypot(tCoords.x - xx, tCoords.y - yy);
-          return dist < 12;
-        }
-        return false;
-      });
-
-      if (clickedLineAnn) {
-        setSelectedAnnotationId(clickedLineAnn.id);
-        setDraggingHandle('body');
-        setDragOffset({ x: tCoords.x, y: tCoords.y });
-        return;
+    // Check if clicking near the line body of ANY ruler/annotation (hit distance 14px)
+    const clickedLineAnn = annotations.find((ann) => {
+      if (ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
+        const x1 = ann.x1, y1 = ann.y1 ?? 0, x2 = ann.x2, y2 = ann.y2 ?? 0;
+        const A = tCoords.x - x1, B = tCoords.y - y1, C = x2 - x1, D = y2 - y1;
+        const dot = A * C + B * D;
+        const lenSq = C * C + D * D;
+        let param = -1;
+        if (lenSq !== 0) param = dot / lenSq;
+        let xx, yy;
+        if (param < 0) { xx = x1; yy = y1; }
+        else if (param > 1) { xx = x2; yy = y2; }
+        else { xx = x1 + param * C; yy = y1 + param * D; }
+        const dist = Math.hypot(tCoords.x - xx, tCoords.y - yy);
+        return dist < 14;
       }
+      return false;
+    });
+
+    if (clickedLineAnn) {
+      setSelectedAnnotationId(clickedLineAnn.id);
+      setDraggingHandle('body');
+      setDragOffset({ x: tCoords.x, y: tCoords.y });
+      return;
+    }
+
+    // Handle 2-Point Calibration Click Mode
+    if (isCalibrating2Points) {
+      const snap = findSnapTarget(tCoords.x, tCoords.y);
+      const clickedPt = snap ? { x: snap.x, y: snap.y } : { x: Math.round(tCoords.x), y: Math.round(tCoords.y) };
+
+      if (calib2Points.length === 0) {
+        setCalib2Points([clickedPt]);
+        setEditorMessage('🎯 Punto 1 fijado. Ahora haga clic en el SEGUNDO PUNTO de la estructura o referencia conocida.');
+      } else {
+        const pt1 = calib2Points[0];
+        const pt2 = clickedPt;
+        const pxDistance = Math.hypot(pt2.x - pt1.x, pt2.y - pt1.y);
+
+        if (pxDistance < 3) {
+          setEditorMessage('Atención: El segundo punto está demasiado cerca del primero. Seleccione un punto más distante.');
+          return;
+        }
+
+        setCalib2Points([pt1, pt2]);
+        setIsCalibrating2Points(false);
+        setShow2PointModal(true);
+        setEditorMessage(`📐 2 Puntos marcados (${Math.round(pxDistance)} px). Ingrese la distancia real conocida en milímetros.`);
+      }
+      return;
     }
 
     // Handle 'join_points' click tool
@@ -1451,7 +1846,56 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
 
       if (foundLandmark) {
         setDraggingLandmark(foundLandmark);
+        setActiveGuideLandmarkKey(foundLandmark);
         return; // intercept and do not trigger drawing
+      }
+
+      // If user clicked on canvas and is in manual placement mode (or select mode):
+      if (isManualPlacing || activeTool === 'select') {
+        const pointToPlace = activeGuideLandmarkKey || 'S';
+        const newLandmarks = {
+          ...landmarks,
+          [pointToPlace]: { x: Math.round(tCoords.x * 10) / 10, y: Math.round(tCoords.y * 10) / 10 }
+        };
+        setLandmarks(newLandmarks);
+        saveToHistory(undefined, newLandmarks);
+
+        // Auto-advance to the next point in standard cephalometric sequence!
+        const currentIndex = CEPH_LANDMARKS_ORDER.indexOf(pointToPlace);
+        let nextPointKey: string | null = null;
+        if (currentIndex !== -1) {
+          // Find next unplaced point after current
+          for (let i = currentIndex + 1; i < CEPH_LANDMARKS_ORDER.length; i++) {
+            const k = CEPH_LANDMARKS_ORDER[i];
+            if (!newLandmarks[k]) {
+              nextPointKey = k;
+              break;
+            }
+          }
+          // If all subsequent are placed, look for any earlier unplaced point
+          if (!nextPointKey) {
+            for (let i = 0; i < currentIndex; i++) {
+              const k = CEPH_LANDMARKS_ORDER[i];
+              if (!newLandmarks[k]) {
+                nextPointKey = k;
+                break;
+              }
+            }
+          }
+          // If all placed, just move to next in list cyclically
+          if (!nextPointKey && currentIndex < CEPH_LANDMARKS_ORDER.length - 1) {
+            nextPointKey = CEPH_LANDMARKS_ORDER[currentIndex + 1];
+          }
+        }
+
+        if (nextPointKey) {
+          setActiveGuideLandmarkKey(nextPointKey);
+          const guideName = CEPHALOMETRIC_GUIDES[nextPointKey]?.name || nextPointKey;
+          setEditorMessage(`📍 Punto [${pointToPlace}] colocado. Siguiente: [${nextPointKey}] - ${guideName}.`);
+        } else {
+          setEditorMessage(`🎉 ¡Todos los puntos cefalométricos han sido colocados! Haz clic en "Guardar Aprendizaje IA" para entrenar al modelo.`);
+        }
+        return;
       }
     }
 
@@ -1513,15 +1957,19 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
       const finalX = snap ? snap.x : tCoords.x;
       const finalY = snap ? snap.y : tCoords.y;
 
+      const activeScale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+
       const updatedAnns = annotations.map((ann) => {
         if (ann.id === selectedAnnotationId && ann.type === 'line' && ann.x1 !== undefined && ann.x2 !== undefined) {
           let nx1 = ann.x1, ny1 = ann.y1 ?? 0, nx2 = ann.x2, ny2 = ann.y2 ?? 0;
           if (draggingHandle === 'endpoint1') {
-            nx1 = finalX;
-            ny1 = finalY;
+            const snapped = snapOrthogonal(nx2, ny2, finalX, finalY, isVerticalLocked, e.shiftKey);
+            nx1 = snapped.x;
+            ny1 = snapped.y;
           } else if (draggingHandle === 'endpoint2') {
-            nx2 = finalX;
-            ny2 = finalY;
+            const snapped = snapOrthogonal(nx1, ny1, finalX, finalY, isVerticalLocked, e.shiftKey);
+            nx2 = snapped.x;
+            ny2 = snapped.y;
           } else if (draggingHandle === 'body') {
             const dx = tCoords.x - dragOffset.x;
             const dy = tCoords.y - dragOffset.y;
@@ -1529,7 +1977,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
             setDragOffset({ x: tCoords.x, y: tCoords.y });
           }
           const pixelDist = Math.hypot(nx2 - nx1, ny2 - ny1);
-          const mmDist = Math.round((pixelDist / pixelsPerMm) * 10) / 10;
+          const mmDist = Math.round((pixelDist / activeScale) * 10) / 10;
+
           return {
             ...ann,
             x1: nx1,
@@ -1601,7 +2050,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     if (activeTool === 'line' && currentLine) {
       const finalX = snap ? snap.x : tCoords.x;
       const finalY = snap ? snap.y : tCoords.y;
-      setCurrentLine({ ...currentLine, x2: finalX, y2: finalY });
+      const snapped = snapOrthogonal(currentLine.x1, currentLine.y1, finalX, finalY, isVerticalLocked, e.shiftKey);
+      setCurrentLine({ ...currentLine, x2: snapped.x, y2: snapped.y });
     } else if (activeTool === 'pencil') {
       setCurrentPencilPoints([...currentPencilPoints, tCoords]);
     }
@@ -1734,7 +2184,11 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
   const handleCenterImage = () => {
     setZoomScale(1.0);
     setPanOffset({ x: 0, y: 0 });
-    showTempMessage('Imagen centrada y zoom restablecido correctamente');
+    setRadiographyLayer((prev) => ({ ...prev, x: 0, y: 0, scale: 1.0, rotation: 0 }));
+    setPhotoLayer((prev) => ({ ...prev, x: 0, y: 0, scale: 1.0, rotation: 0 }));
+    setTracingsLayer((prev) => ({ ...prev, x: 0, y: 0, scale: 1.0, rotation: 0 }));
+    setRotation(0);
+    showTempMessage('🎯 Imagen centrada y zoom restablecido correctamente');
   };
 
   const handleResetFilters = () => {
@@ -2058,13 +2512,16 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len === 0) return 0;
     const distPx = Math.abs(dy * pt.x - dx * pt.y + p2.x * p1.y - p2.y * p1.x) / len;
-    return Math.round((distPx / 10) * 10) / 10;
+    const scale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+    return Math.round((distPx / scale) * 10) / 10;
   };
 
   const calculateDistance = (p1: { x: number; y: number }, p2: { x: number; y: number }): number => {
     const dx = p1.x - p2.x;
     const dy = p1.y - p2.y;
-    return Math.round((Math.sqrt(dx * dx + dy * dy) / 5) * 10) / 10;
+    const distPx = Math.sqrt(dx * dx + dy * dy);
+    const scale = pixelsPerMm > 0 ? pixelsPerMm : 10.0;
+    return Math.round((distPx / scale) * 10) / 10;
   };
 
   // PRE-STEINER VERIFICATION ENGINE
@@ -2700,19 +3157,179 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
     setSmileNotes(smileNotes.filter((_, i) => i !== idx));
   };
 
+  // Professional Clinical Measurement Ruler Renderer with Real-time Graduations & Ticks
+  const renderRulerSVG = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    color: string,
+    isSelected: boolean,
+    scalePxPerMm: number,
+    titleText?: string,
+    isCalibrationRuler?: boolean
+  ) => {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenPx = Math.hypot(dx, dy);
+    if (lenPx < 2) return null;
+
+    const scale = scalePxPerMm > 0 ? scalePxPerMm : 10.0;
+    const totalMm = Math.round((lenPx / scale) * 10) / 10;
+
+    // Unit direction along ruler
+    const ux = dx / lenPx;
+    const uy = dy / lenPx;
+
+    // Unit normal vector (perpendicular to ruler line)
+    const nx = -uy;
+    const ny = ux;
+
+    const maxMm = Math.floor(lenPx / scale);
+
+    const ticks = [];
+    for (let m = 0; m <= maxMm; m++) {
+      const dPx = m * scale;
+      if (dPx > lenPx + 0.5) break;
+
+      const tx = x1 + dPx * ux;
+      const ty = y1 + dPx * uy;
+
+      let tickLen = 3;
+      let isMajor = false;
+      let isMedium = false;
+
+      if (m % 10 === 0) {
+        tickLen = 8;
+        isMajor = true;
+      } else if (m % 5 === 0) {
+        tickLen = 5;
+        isMedium = true;
+      } else {
+        if (scale < 2.5) continue; // skip minor ticks if scale is too dense
+        tickLen = 3;
+      }
+
+      const tx2 = tx + nx * tickLen;
+      const ty2 = ty + ny * tickLen;
+
+      ticks.push(
+        <g key={`ruler-tick-${m}`}>
+          <line
+            x1={tx}
+            y1={ty}
+            x2={tx2}
+            y2={ty2}
+            stroke={isSelected ? '#00f0ff' : color}
+            strokeWidth={isMajor ? 1.4 : isMedium ? 1.0 : 0.6}
+            opacity={isMajor ? 0.9 : 0.75}
+          />
+          {isMajor && m > 0 && (
+            <text
+              x={tx + nx * (tickLen + 5)}
+              y={ty + ny * (tickLen + 5) + 2.5}
+              fill={isSelected ? '#00f0ff' : '#00f0ff'}
+              fontSize="7.5"
+              fontWeight="bold"
+              fontFamily="monospace"
+              textAnchor="middle"
+            >
+              {m}
+            </text>
+          )}
+        </g>
+      );
+    }
+
+    const cx = (x1 + x2) / 2;
+    const cy = (y1 + y2) / 2;
+
+    return (
+      <g className="clinical-ruler-renderer">
+        {/* Subtle Selection Highlight */}
+        {isSelected && (
+          <line
+            x1={x1}
+            y1={y1}
+            x2={x2}
+            y2={y2}
+            stroke="#00f0ff"
+            strokeWidth="4"
+            opacity="0.2"
+          />
+        )}
+
+        {/* Main Spine Ruler Line */}
+        <line
+          x1={x1}
+          y1={y1}
+          x2={x2}
+          y2={y2}
+          stroke={isSelected ? '#00f0ff' : color}
+          strokeWidth={isSelected ? '2' : '1.5'}
+          strokeLinecap="round"
+          opacity="0.95"
+        />
+
+        {/* Graduations & Millimeter Ticks */}
+        <g>{ticks}</g>
+
+        {/* Start Point (P1) - Fine Crosshair & Precision Dot */}
+        <g transform={`translate(${x1}, ${y1})`}>
+          <line x1="-4" y1="0" x2="4" y2="0" stroke={isSelected ? '#00f0ff' : color} strokeWidth="1" />
+          <line x1="0" y1="-4" x2="0" y2="4" stroke={isSelected ? '#00f0ff' : color} strokeWidth="1" />
+          <circle cx="0" cy="0" r="3" fill="#00f0ff" stroke="#020617" strokeWidth="1" />
+          {isSelected && (
+            <circle cx="0" cy="0" r="6" fill="none" stroke="#00f0ff" strokeWidth="1" opacity="0.8" />
+          )}
+        </g>
+
+        {/* End Point (P2) - Fine Crosshair & Precision Dot */}
+        <g transform={`translate(${x2}, ${y2})`}>
+          <line x1="-4" y1="0" x2="4" y2="0" stroke={isSelected ? '#00f0ff' : color} strokeWidth="1" />
+          <line x1="0" y1="-4" x2="0" y2="4" stroke={isSelected ? '#00f0ff' : color} strokeWidth="1" />
+          <circle cx="0" cy="0" r="3" fill="#00f0ff" stroke="#020617" strokeWidth="1" />
+          {isSelected && (
+            <circle cx="0" cy="0" r="6" fill="none" stroke="#00f0ff" strokeWidth="1" opacity="0.8" />
+          )}
+        </g>
+
+        {/* Clean Live Dynamic Measurement Text (No Obstructive Background Rectangles) */}
+        <text
+          x={cx + nx * 14}
+          y={cy + ny * 14 + 4}
+          fill="#00f0ff"
+          stroke="#020617"
+          strokeWidth="3"
+          paintOrder="stroke fill"
+          fontSize="11.5"
+          fontWeight="bold"
+          fontFamily="monospace"
+          textAnchor="middle"
+          style={{ pointerEvents: 'none' }}
+        >
+          {totalMm} mm
+        </text>
+      </g>
+    );
+  };
+
   // Render clean background or uploaded radiography image
   const renderXRayBaseTemplate = () => {
     // If a custom image or URL is loaded, render it directly
     if (currentImageUrl.startsWith('data:image/') || currentImageUrl.startsWith('http') || currentImageUrl.startsWith('blob:')) {
       return (
-        <image 
-          href={currentImageUrl} 
-          x="0" 
-          y="0" 
-          width="800" 
-          height="500" 
-          preserveAspectRatio="xMidYMid meet" 
-        />
+        <g id="xray-image-group">
+          <rect width="800" height="500" fill="#07080b" />
+          <image 
+            href={currentImageUrl} 
+            x="0" 
+            y="0" 
+            width="800" 
+            height="500" 
+            preserveAspectRatio="xMidYMid meet" 
+          />
+        </g>
       );
     }
 
@@ -2995,11 +3612,24 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
 
             <div className="flex items-center gap-2 flex-wrap">
               <button
+                onClick={handleStart2PointCalibration}
+                className={`px-3 py-1.5 font-bold rounded-xl transition-all shadow-sm flex items-center gap-1.5 cursor-pointer ${
+                  isCalibrating2Points
+                    ? 'bg-cyan-400 text-slate-950 ring-2 ring-cyan-300 animate-pulse'
+                    : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950'
+                }`}
+                title="Marque 2 puntos en cualquier estructura o regla física conocida de la radiografía para calibrar la escala real en mm"
+              >
+                <Crosshair size={13} />
+                <span>{isCalibrating2Points ? 'Haga Clic en Punto 1...' : 'Calibrar por 2 Puntos'}</span>
+              </button>
+
+              <button
                 onClick={handleAlignForeheadRuler}
                 className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
               >
                 <Scale size={13} />
-                <span>Alinear Regla en Apoyafrente</span>
+                <span>Alinear Regla Apoyafrente</span>
               </button>
 
               <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-amber-500/30">
@@ -3146,9 +3776,9 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
 
         {nemoStep === 4 && (
           <div className="bg-slate-900/95 text-white border-b border-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 flex-wrap">
               <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
-                <span className="text-[10px] text-slate-400 font-bold px-2 uppercase">Etapa Pre-Tratamiento:</span>
+                <span className="text-[10px] text-slate-400 font-bold px-2 uppercase">Etapa:</span>
                 <button
                   onClick={() => {
                     if (treatmentStage === 'final') {
@@ -3158,13 +3788,13 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                       setEditorMessage('📍 Trazado cambiado a: Inicial (Pre-Tratamiento)');
                     }
                   }}
-                  className={`px-3 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
                     treatmentStage === 'inicial'
                       ? 'bg-blue-600 text-white shadow-xs'
                       : 'text-slate-400 hover:bg-slate-800'
                   }`}
                 >
-                  1. Inicial (Pre-Tratamiento)
+                  1. Inicial
                 </button>
                 <button
                   onClick={() => {
@@ -3175,40 +3805,81 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                       setEditorMessage('📍 Trazado cambiado a: Final (Post-Tratamiento)');
                     }
                   }}
-                  className={`px-3 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-lg font-bold text-xs transition-all cursor-pointer ${
                     treatmentStage === 'final'
                       ? 'bg-emerald-600 text-white shadow-xs'
                       : 'text-slate-400 hover:bg-slate-800'
                   }`}
                 >
-                  2. Final (Post-Tratamiento)
+                  2. Final
                 </button>
               </div>
 
+              {/* MANUAL PLACEMENT MODE TOGGLE BUTTON */}
               <button
-                onClick={() => setShowPointGuideWindow(!showPointGuideWindow)}
-                className={`px-2.5 py-1 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 cursor-pointer border ${
-                  showPointGuideWindow ? 'bg-cyan-950 text-cyan-300 border-cyan-500/50' : 'bg-slate-800 text-slate-300 border-slate-700'
+                onClick={() => {
+                  if (isManualPlacing) {
+                    setIsManualPlacing(false);
+                    setEditorMessage('Modo manual pausado.');
+                  } else {
+                    handleStartManualPlacement();
+                  }
+                }}
+                className={`px-3 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-sm ${
+                  isManualPlacing
+                    ? 'bg-cyan-500 text-slate-950 shadow-cyan-500/30 ring-2 ring-cyan-300 animate-pulse'
+                    : 'bg-slate-800 text-cyan-300 border border-slate-700 hover:bg-slate-750'
                 }`}
+                title="Activa el modo de colocación punto por punto con clic en la radiografía"
               >
-                <Eye size={12} />
-                <span>{showPointGuideWindow ? 'Guía Flotante Activa' : 'Mostrar Guía Flotante de Puntos'}</span>
+                <Target size={13} />
+                <span>{isManualPlacing ? '🎯 Modo Manual ACTIVO' : '🎯 Colocar Manualmente'}</span>
               </button>
+
+              {/* CLEAR LANDMARKS BUTTON */}
+              <button
+                onClick={handleClearAllLandmarks}
+                className="px-2.5 py-1.5 bg-slate-800 hover:bg-rose-950 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-700 rounded-xl font-bold text-xs transition-all flex items-center gap-1 cursor-pointer"
+                title="Limpiar todos los puntos para colocarlos desde cero manualmente"
+              >
+                <Trash2 size={12} />
+                <span>Limpiar</span>
+              </button>
+
+              {/* SAVE MANUAL AS AI LEARNING REFERENCE BUTTON */}
+              <button
+                onClick={handleSaveAILearningModel}
+                className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white rounded-xl font-bold text-xs shadow-sm flex items-center gap-1.5 cursor-pointer transition-all"
+                title="Guarda tus puntos manuales para que la IA aprenda tu criterio anatómico de colocación"
+              >
+                <GraduationCap size={13} />
+                <span>Guardar Aprendizaje IA</span>
+              </button>
+
+              {/* Progress Count Badge */}
+              <div className="bg-slate-950 px-2.5 py-1 rounded-xl border border-slate-800 flex items-center gap-1.5">
+                <span className="text-[10px] text-slate-400">Puntos:</span>
+                <span className="font-mono font-bold text-cyan-300 text-xs">
+                  {Object.keys(landmarks).length} / 25
+                </span>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* AI Auto-Detection (incorporates user learned criteria) */}
               <button
                 onClick={() => handleRunAILandmarkDetection(true)}
                 disabled={isAIDetectingLandmarks}
-                className="px-3 py-1 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl text-xs shadow-sm flex items-center gap-1.5 cursor-pointer"
+                className="px-3 py-1.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl text-xs shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                title={hasLearnedModel ? `Colocar puntos con IA calibrada con tu criterio aprendido (${learnedModelDate})` : 'Colocar puntos con IA'}
               >
                 {isAIDetectingLandmarks ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-                <span>Colocar Puntos con IA</span>
+                <span>{hasLearnedModel ? '✨ Colocar con IA (Calibrada)' : 'Colocar Puntos con IA'}</span>
               </button>
 
               <button
                 onClick={() => setNemoStep(5)}
-                className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs transition-all shadow-sm flex items-center gap-1 cursor-pointer ml-2"
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs transition-all shadow-sm flex items-center gap-1 cursor-pointer ml-1"
               >
                 <span>Ver Resultados (Paso 5)</span>
                 <ArrowRight size={13} />
@@ -3245,8 +3916,39 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
         {/* The Core Image Box containing custom image & svg overlay math */}
         <div 
           ref={imageContainerRef}
-          className="flex-1 min-h-[550px] lg:min-h-[720px] h-[550px] lg:h-[720px] bg-slate-950 flex items-center justify-center p-4 overflow-hidden relative"
+          className="flex-1 w-full h-full min-h-[450px] bg-slate-950 flex items-center justify-center p-2 sm:p-4 overflow-hidden relative"
         >
+          {/* 2-POINT CALIBRATION GUIDANCE BANNER OVERLAY */}
+          {isCalibrating2Points && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 text-cyan-300 border border-cyan-400 px-5 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3.5 backdrop-blur-md animate-in fade-in slide-in-from-top-4">
+              <div className="p-2 bg-cyan-500/20 rounded-xl text-cyan-400 border border-cyan-400/40">
+                <Crosshair size={20} className="animate-spin-slow" />
+              </div>
+              <div>
+                <p className="font-bold text-xs text-white">
+                  {calib2Points.length === 0
+                    ? '🎯 Modo Calibración por 2 Puntos: Haga clic en el PRIMER PUNTO'
+                    : '🎯 Ahora haga clic en el SEGUNDO PUNTO de la estructura conocida'}
+                </p>
+                <p className="text-[11px] text-cyan-300/90">
+                  {calib2Points.length === 0
+                    ? 'Marque cualquier estructura o regla física conocida en la radiografía.'
+                    : 'Punto 1 fijado correctamente. Haga clic en el segundo punto.'}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsCalibrating2Points(false);
+                  setCalib2Points([]);
+                  setEditorMessage('Calibración por 2 puntos cancelada.');
+                }}
+                className="ml-2 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl transition-all cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          )}
+
           {/* Floating AI Auto-Location Offer Banner */}
           {showAILoadBanner && (
             <div className="absolute top-4 left-4 z-30 bg-slate-900/90 backdrop-blur-md text-white border border-cyan-500/50 rounded-2xl p-3 shadow-2xl flex items-center gap-3 max-w-md w-[88%] animate-fade-in">
@@ -3336,6 +4038,158 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
             </div>
           )}
 
+          {/* Floating Cephalometric Manual Placement Navigation HUD on the canvas */}
+          {activeAnalysisTab === 'cephalometric' && isManualPlacing && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 flex items-center flex-wrap justify-center gap-2 bg-slate-900/95 backdrop-blur-md border-2 border-cyan-500/80 px-3.5 py-2 rounded-2xl shadow-2xl text-xs font-semibold text-white animate-fade-in max-w-2xl">
+              <div className="flex items-center gap-1.5">
+                <span className="p-1 bg-cyan-500 text-slate-950 rounded-lg font-black text-xs animate-pulse">
+                  🎯 {activeGuideLandmarkKey}
+                </span>
+                <div>
+                  <span className="font-bold text-cyan-300 text-xs block leading-tight">
+                    {CEPHALOMETRIC_GUIDES[activeGuideLandmarkKey]?.name || `Punto ${activeGuideLandmarkKey}`}
+                  </span>
+                  <span className="text-[10px] text-slate-300 block truncate max-w-xs">
+                    💡 {CEPHALOMETRIC_GUIDES[activeGuideLandmarkKey]?.tip || 'Haz clic sobre la radiografía para colocar'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Point Navigation & Progress */}
+              <div className="flex items-center gap-1 bg-slate-950 px-2 py-1 rounded-xl border border-slate-800">
+                <button
+                  onClick={() => {
+                    const idx = CEPH_LANDMARKS_ORDER.indexOf(activeGuideLandmarkKey);
+                    if (idx > 0) setActiveGuideLandmarkKey(CEPH_LANDMARKS_ORDER[idx - 1]);
+                  }}
+                  disabled={CEPH_LANDMARKS_ORDER.indexOf(activeGuideLandmarkKey) === 0}
+                  className="p-1 text-slate-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                  title="Punto anterior"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <span className="font-mono font-bold text-cyan-400 text-xs px-1">
+                  {CEPH_LANDMARKS_ORDER.indexOf(activeGuideLandmarkKey) + 1} / {CEPH_LANDMARKS_ORDER.length}
+                </span>
+                <button
+                  onClick={() => {
+                    const idx = CEPH_LANDMARKS_ORDER.indexOf(activeGuideLandmarkKey);
+                    if (idx < CEPH_LANDMARKS_ORDER.length - 1) setActiveGuideLandmarkKey(CEPH_LANDMARKS_ORDER[idx + 1]);
+                  }}
+                  disabled={CEPH_LANDMARKS_ORDER.indexOf(activeGuideLandmarkKey) === CEPH_LANDMARKS_ORDER.length - 1}
+                  className="p-1 text-slate-400 hover:text-white disabled:opacity-30 cursor-pointer"
+                  title="Punto siguiente"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+
+              {/* Training / Save button */}
+              <button
+                onClick={handleSaveAILearningModel}
+                className="px-2.5 py-1 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white rounded-xl text-[11px] font-bold shadow-sm flex items-center gap-1 cursor-pointer"
+                title="Guardar tus puntos para calibrar el modelo IA"
+              >
+                <GraduationCap size={13} />
+                <span>Entrenar IA</span>
+              </button>
+
+              {/* Close manual mode */}
+              <button
+                onClick={() => setIsManualPlacing(false)}
+                className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                title="Pausar modo manual"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          {/* Floating Selected Ruler Action Bar on the canvas */}
+          {selectedAnnotationId && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center flex-wrap justify-center gap-1.5 bg-slate-900/95 backdrop-blur-md border border-cyan-500/50 px-3 py-1.5 rounded-xl shadow-2xl text-xs font-semibold text-white animate-fade-in max-w-full">
+              <span className="text-cyan-300 text-[11px] font-bold flex items-center gap-1">
+                <Scale size={13} className="text-cyan-400" /> Medida:
+              </span>
+
+              {/* Direct Manual Number Input + Stepper */}
+              <div className="flex items-center gap-1 bg-slate-950 px-1.5 py-0.5 rounded-lg border border-slate-700">
+                <button
+                  onClick={() => handleStepRulerLength(-0.1)}
+                  className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-[10px] font-bold cursor-pointer transition-colors"
+                  title="Disminuir 0.1 mm (o presiona ↓)"
+                >
+                  -0.1
+                </button>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  value={directMmInput}
+                  onChange={(e) => {
+                    setDirectMmInput(e.target.value);
+                    const val = parseFloat(e.target.value);
+                    if (!isNaN(val) && val > 0) {
+                      handleSetSelectedRulerLength(val);
+                    }
+                  }}
+                  className="w-12 px-1 py-0.5 bg-slate-900 text-center font-mono font-bold text-cyan-300 text-xs rounded border border-slate-700 focus:outline-none focus:border-cyan-400"
+                  title="Escribe la medida exacta en mm (ej. 10.0) y la regla se adaptará de inmediato"
+                />
+                <span className="text-[10px] text-cyan-400 font-bold">mm</span>
+                <button
+                  onClick={() => handleStepRulerLength(0.1)}
+                  className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-[10px] font-bold cursor-pointer transition-colors"
+                  title="Aumentar 0.1 mm (o presiona ↑)"
+                >
+                  +0.1
+                </button>
+              </div>
+
+              {/* Fast 1mm Steps */}
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => handleStepRulerLength(-1.0)}
+                  className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[9px] font-bold cursor-pointer"
+                  title="Disminuir 1.0 mm (o Shift + ↓)"
+                >
+                  -1
+                </button>
+                <button
+                  onClick={() => handleStepRulerLength(1.0)}
+                  className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded text-[9px] font-bold cursor-pointer"
+                  title="Aumentar 1.0 mm (o Shift + ↑)"
+                >
+                  +1
+                </button>
+              </div>
+
+              <div className="w-px h-4 bg-slate-700 mx-0.5" />
+
+              <button
+                onClick={handleAlignSelectedVertical}
+                className="px-2 py-1 bg-cyan-600/90 hover:bg-cyan-500 text-white rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shadow-sm"
+                title="Alinear la regla seleccionada a 90° (Vertical perfecta)"
+              >
+                <MoveVertical size={12} /> 90°
+              </button>
+              <button
+                onClick={handleAlignSelectedHorizontal}
+                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                title="Alinear la regla seleccionada a 0° (Horizontal perfecta)"
+              >
+                <MoveHorizontal size={12} /> 0°
+              </button>
+              <button
+                onClick={handleDeleteSelectedAnnotation}
+                className="p-1 bg-rose-950/70 hover:bg-rose-800 text-rose-300 rounded-lg transition-all cursor-pointer"
+                title="Eliminar regla seleccionada"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          )}
+
           {/* Floating Controls Overlay on the radiography box */}
           <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 bg-slate-900/95 backdrop-blur-md border border-slate-850 p-2 rounded-xl shadow-xl">
             <button
@@ -3362,6 +4216,22 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
               title="Herramienta de Arrastre / Mano (Mover)"
             >
               <Hand size={15} />
+            </button>
+            <button
+              onClick={() => {
+                setIsVerticalLocked(prev => !prev);
+                setEditorMessage(!isVerticalLocked ? '↕ Bloqueo Vertical ACTIVADO: Las reglas se ajustarán a 90°' : '↕ Bloqueo Vertical DESACTIVADO');
+                setTimeout(() => setEditorMessage(null), 3000);
+              }}
+              className={`p-2 rounded-lg transition-all cursor-pointer flex flex-col items-center justify-center gap-0.5 ${
+                isVerticalLocked
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow-md shadow-cyan-500/30'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+              title={isVerticalLocked ? 'Bloqueo Vertical ACTIVADO (Click para desactivar)' : 'Bloqueo Vertical: Fuerza el trazo y ajuste en línea vertical exacta'}
+            >
+              <MoveVertical size={15} />
+              <span className="text-[8px] font-bold">Vertical</span>
             </button>
             {activeAnalysisTab === 'cephalometric' && (
               <button
@@ -3396,15 +4266,26 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
               transform: `rotate(${rotation}deg)`,
               transformOrigin: 'center center',
               transition: isDrawing || draggingLandmark ? 'none' : 'filter 0.2s ease, transform 0.2s ease-out',
-              width: '100%',
+              maxWidth: '100%',
+              maxHeight: '100%',
               aspectRatio: '8/5'
             }}
-            className="relative select-none rounded-xl overflow-hidden border border-slate-900 shadow-2xl bg-slate-900"
+            className="relative select-none rounded-xl overflow-hidden border border-slate-900 shadow-2xl bg-slate-900 w-full h-full flex items-center justify-center mx-auto my-auto"
           >
             <svg
               ref={svgRef}
               viewBox="0 0 800 500"
-              className={`w-full h-full relative ${activeTool === 'pan' ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : (activeTool === 'select' ? 'cursor-crosshair' : 'cursor-none')}`}
+              className={`w-full h-full relative ${
+                activeTool === 'pan'
+                  ? (isPanning ? 'cursor-grabbing' : 'cursor-grab')
+                  : draggingLandmark
+                  ? 'cursor-move'
+                  : (isManualPlacing || activeAnalysisTab === 'cephalometric')
+                  ? 'cursor-crosshair'
+                  : activeTool === 'select'
+                  ? 'cursor-default'
+                  : 'cursor-crosshair'
+              }`}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
@@ -3659,9 +4540,6 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                         const isSelected = ann.id === selectedAnnotationId;
 
                         if (ann.type === 'line' && ann.x1 !== undefined && ann.y1 !== undefined && ann.x2 !== undefined && ann.y2 !== undefined) {
-                          const cx = (ann.x1 + ann.x2) / 2;
-                          const cy = (ann.y1 + ann.y2) / 2;
-
                           return (
                             <g 
                               key={ann.id}
@@ -3671,91 +4549,17 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                               }}
                               className="cursor-pointer group"
                             >
-                              {/* Selection Glow line when selected */}
-                              {isSelected && (
-                                <line
-                                  x1={ann.x1}
-                                  y1={ann.y1}
-                                  x2={ann.x2}
-                                  y2={ann.y2}
-                                  stroke="#00f0ff"
-                                  strokeWidth="10"
-                                  opacity="0.4"
-                                  className="animate-pulse"
-                                />
+                              {renderRulerSVG(
+                                ann.x1,
+                                ann.y1,
+                                ann.x2,
+                                ann.y2,
+                                ann.color,
+                                isSelected,
+                                pixelsPerMm,
+                                ann.text,
+                                ann.id === 'ann-forehead-ruler' || ann.isCalibration
                               )}
-
-                              {/* Main Ruler Line */}
-                              <line
-                                x1={ann.x1}
-                                y1={ann.y1}
-                                x2={ann.x2}
-                                y2={ann.y2}
-                                stroke={isSelected ? '#00f0ff' : ann.color}
-                                strokeWidth={isSelected ? '4' : '3.5'}
-                                strokeLinecap="round"
-                                opacity="0.9"
-                              />
-
-                              {/* Endpoint Precision Crosshairs (replacing simple circles for better visualization/alignment) */}
-                              <g transform={`translate(${ann.x1}, ${ann.y1})`}>
-                                <line x1="-8" y1="0" x2="8" y2="0" stroke={isSelected ? '#00f0ff' : ann.color} strokeWidth="1.5" />
-                                <line x1="0" y1="-8" x2="0" y2="8" stroke={isSelected ? '#00f0ff' : ann.color} strokeWidth="1.5" />
-                                <circle cx="0" cy="0" r="4.5" fill="none" stroke={isSelected ? '#00f0ff' : ann.color} strokeWidth="1" />
-                                <circle cx="0" cy="0" r="1" fill={isSelected ? '#00f0ff' : ann.color} />
-                              </g>
-                              <g transform={`translate(${ann.x2}, ${ann.y2})`}>
-                                <line x1="-8" y1="0" x2="8" y2="0" stroke={isSelected ? '#00f0ff' : ann.color} strokeWidth="1.5" />
-                                <line x1="0" y1="-8" x2="0" y2="8" stroke={isSelected ? '#00f0ff' : ann.color} strokeWidth="1.5" />
-                                <circle cx="0" cy="0" r="4.5" fill="none" stroke={isSelected ? '#00f0ff' : ann.color} strokeWidth="1" />
-                                <circle cx="0" cy="0" r="1" fill={isSelected ? '#00f0ff' : ann.color} />
-                              </g>
-
-                              {/* Interactive Draggable Handle 1 (if selected) - Enhanced with Precision Crosshair */}
-                              {isSelected && (
-                                <g transform={`translate(${ann.x1}, ${ann.y1})`}>
-                                  <circle cx="0" cy="0" r="16" fill="none" stroke="#00f0ff" strokeWidth="1.5" className="animate-ping" />
-                                  <circle cx="0" cy="0" r="10" fill="none" stroke="#00f0ff" strokeWidth="1.5" />
-                                  <line x1="-15" y1="0" x2="15" y2="0" stroke="#00f0ff" strokeWidth="2" />
-                                  <line x1="0" y1="-15" x2="0" y2="15" stroke="#00f0ff" strokeWidth="2" />
-                                  <circle cx="0" cy="0" r="2.5" fill="#0f172a" stroke="#00f0ff" strokeWidth="1.5" />
-                                </g>
-                              )}
-
-                              {/* Interactive Draggable Handle 2 (if selected) - Enhanced with Precision Crosshair */}
-                              {isSelected && (
-                                <g transform={`translate(${ann.x2}, ${ann.y2})`}>
-                                  <circle cx="0" cy="0" r="16" fill="none" stroke="#00f0ff" strokeWidth="1.5" className="animate-ping" />
-                                  <circle cx="0" cy="0" r="10" fill="none" stroke="#00f0ff" strokeWidth="1.5" />
-                                  <line x1="-15" y1="0" x2="15" y2="0" stroke="#00f0ff" strokeWidth="2" />
-                                  <line x1="0" y1="-15" x2="0" y2="15" stroke="#00f0ff" strokeWidth="2" />
-                                  <circle cx="0" cy="0" r="2.5" fill="#0f172a" stroke="#00f0ff" strokeWidth="1.5" />
-                                </g>
-                              )}
-
-                              {/* mm Indicator bubble */}
-                              <g transform={`translate(${cx}, ${cy - 14})`}>
-                                <rect
-                                  x="-40"
-                                  y="-11"
-                                  width="80"
-                                  height="20"
-                                  rx="5"
-                                  fill="#0f172a"
-                                  stroke={isSelected ? '#00f0ff' : ann.color}
-                                  strokeWidth={isSelected ? '2' : '1.2'}
-                                />
-                                <text
-                                  fill="#ffffff"
-                                  fontSize="10"
-                                  fontWeight="bold"
-                                  fontFamily="monospace"
-                                  textAnchor="middle"
-                                  y="3"
-                                >
-                                  {ann.text ? `${ann.text}: ` : ''}{ann.lengthMm} mm
-                                </text>
-                              </g>
                             </g>
                           );
                         }
@@ -3810,8 +4614,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                         return null;
                       })}
 
-                      {/* LIVE DRAWING RANGE OVERLAY */}
-                      {(currentRangeBox || selectedRangeBox) && (
+                      {/* LIVE DRAWING RANGE OVERLAY (Only in Range Calibration Tool, never covering Cephalometrics) */}
+                      {activeAnalysisTab !== 'cephalometric' && activeTool === 'range' && (currentRangeBox || selectedRangeBox) && (
                         <g id="range-selection-overlay">
                           {(() => {
                             const r = currentRangeBox || selectedRangeBox;
@@ -3859,42 +4663,58 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                         </g>
                       )}
 
-                      {/* MAGNETIC SNAP RING OVERLAY */}
+                      {/* MAGNETIC SNAP INDICATOR (CLEAN & NON-INTRUSIVE) */}
                       {snapTarget && (
                         <g transform={`translate(${snapTarget.x}, ${snapTarget.y})`} style={{ pointerEvents: 'none' }}>
-                          <circle cx="0" cy="0" r="16" fill="none" stroke="#00f0ff" strokeWidth="2" className="animate-ping" />
-                          <circle cx="0" cy="0" r="6" fill="#00f0ff" stroke="#0f172a" strokeWidth="1.5" />
-                          <g transform="translate(10, -12)">
-                            <rect x="0" y="-12" width={snapTarget.label.length * 7.5 + 16} height="16" rx="4" fill="#0f172a" stroke="#00f0ff" strokeWidth="1" />
-                            <text x="5" y="-1" fill="#00f0ff" fontSize="9" fontWeight="bold" fontFamily="sans-serif">
-                              🎯 {snapTarget.label}
-                            </text>
-                          </g>
+                          <circle cx="0" cy="0" r="4.5" fill="none" stroke="#00f0ff" strokeWidth="1.2" opacity="0.85" />
                         </g>
                       )}
 
                       {/* LIVE DRAWING FEEDBACK SHAPES */}
                       {activeTool === 'line' && currentLine && (
-                        <g>
-                          <line
-                            x1={currentLine.x1}
-                            y1={currentLine.y1}
-                            x2={currentLine.x2}
-                            y2={currentLine.y2}
-                            stroke={activeColor}
-                            strokeWidth="2.5"
-                            strokeDasharray="4,4"
-                          />
-                          <g transform={`translate(${currentLine.x1}, ${currentLine.y1})`}>
-                            <line x1="-7" y1="0" x2="7" y2="0" stroke={activeColor} strokeWidth="1.5" />
-                            <line x1="0" y1="-7" x2="0" y2="7" stroke={activeColor} strokeWidth="1.5" />
-                            <circle cx="0" cy="0" r="3.5" fill="none" stroke={activeColor} strokeWidth="1" />
-                          </g>
-                          <g transform={`translate(${currentLine.x2}, ${currentLine.y2})`}>
-                            <line x1="-7" y1="0" x2="7" y2="0" stroke={activeColor} strokeWidth="1.5" />
-                            <line x1="0" y1="-7" x2="0" y2="7" stroke={activeColor} strokeWidth="1.5" />
-                            <circle cx="0" cy="0" r="3.5" fill="none" stroke={activeColor} strokeWidth="1" />
-                          </g>
+                        <g id="live-drawing-ruler">
+                          {renderRulerSVG(
+                            currentLine.x1,
+                            currentLine.y1,
+                            currentLine.x2,
+                            currentLine.y2,
+                            activeColor,
+                            true,
+                            pixelsPerMm,
+                            'Regla'
+                          )}
+                        </g>
+                      )}
+
+                      {/* 2-POINT CALIBRATION OVERLAY POINTS & CONNECTOR */}
+                      {(isCalibrating2Points || calib2Points.length > 0) && (
+                        <g id="calib-2point-overlay" style={{ pointerEvents: 'none' }}>
+                          {calib2Points.map((pt, i) => (
+                            <g key={`calib-pt-${i}`} transform={`translate(${pt.x}, ${pt.y})`}>
+                              <circle cx="0" cy="0" r="12" fill="rgba(0,240,255,0.2)" stroke="#00f0ff" strokeWidth="1.8" className="animate-pulse" />
+                              <line x1="-8" y1="0" x2="8" y2="0" stroke="#00f0ff" strokeWidth="1.5" />
+                              <line x1="0" y1="-8" x2="0" y2="8" stroke="#00f0ff" strokeWidth="1.5" />
+                              <circle cx="0" cy="0" r="2.5" fill="#00f0ff" />
+                              <g transform="translate(14, -10)">
+                                <rect x="0" y="-10" width="60" height="18" rx="4" fill="#0f172a" stroke="#00f0ff" strokeWidth="1" />
+                                <text x="6" y="2" fill="#00f0ff" fontSize="9" fontWeight="bold" fontFamily="monospace">
+                                  Punto {i + 1}
+                                </text>
+                              </g>
+                            </g>
+                          ))}
+
+                          {calib2Points.length === 2 && (
+                            <line
+                              x1={calib2Points[0].x}
+                              y1={calib2Points[0].y}
+                              x2={calib2Points[1].x}
+                              y2={calib2Points[1].y}
+                              stroke="#00f0ff"
+                              strokeWidth="2.5"
+                              strokeDasharray="4,4"
+                            />
+                          )}
                         </g>
                       )}
 
@@ -3918,8 +4738,8 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                 return null;
               })}
 
-              {/* PRECISION CROSSHAIR & REAL-TIME COORDINATES */}
-              {activeTool !== 'select' && activeTool !== 'pan' && hoverCoords && (
+              {/* PRECISION CROSSHAIR & REAL-TIME COORDINATES (Hidden in Cephalometric Mode to prevent blocking anatomical point names) */}
+              {activeAnalysisTab !== 'cephalometric' && activeTool !== 'select' && activeTool !== 'pan' && hoverCoords && (
                 <g style={{ pointerEvents: 'none' }}>
                   {/* Localized crosshair lines centered at cursor */}
                   <line
@@ -4151,7 +4971,12 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
             </button>
 
             <button
-              onClick={() => setActiveAnalysisTab('cephalometric')}
+              onClick={() => {
+                setActiveAnalysisTab('cephalometric');
+                setSelectedRangeBox(null);
+                setCurrentRangeBox(null);
+                if (activeTool === 'range') setActiveTool('select');
+              }}
               className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold flex flex-col items-center gap-0.5 transition-all cursor-pointer min-w-[55px] ${
                 activeAnalysisTab === 'cephalometric'
                   ? 'bg-blue-600 text-white shadow-xs'
@@ -4617,6 +5442,19 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
             </h4>
 
             <div className="space-y-4">
+              <button
+                onClick={handleStart2PointCalibration}
+                className={`w-full py-2.5 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-all ${
+                  isCalibrating2Points
+                    ? 'bg-amber-500 text-slate-950 border-amber-400 ring-2 ring-amber-300 animate-pulse'
+                    : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100/80 shadow-sm'
+                }`}
+                title="Marque 2 puntos en una estructura o regla física conocida de la radiografía para ajustar el multiplicador real en milímetros"
+              >
+                <Crosshair size={16} className="text-amber-700" />
+                <span>📐 Calibrar Escala por 2 Puntos (Referencia mm)</span>
+              </button>
+
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setActiveTool('select')}
@@ -4777,6 +5615,122 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
                       </button>
                     )}
                   </div>
+
+                  {/* Ruler Orientation Controls */}
+                  <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80">
+                    <button
+                      onClick={handleAlignSelectedVertical}
+                      disabled={!selectedAnnotationId}
+                      className={`py-1.5 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                        selectedAnnotationId
+                          ? 'bg-slate-800 hover:bg-cyan-600/30 text-cyan-300 border border-cyan-500/40 hover:border-cyan-400'
+                          : 'bg-slate-800/40 text-slate-500 border border-slate-800 cursor-not-allowed'
+                      }`}
+                      title="Alinear la regla seleccionada exactamente a 90° (Vertical)"
+                    >
+                      <MoveVertical size={13} className="text-cyan-400" />
+                      Alinear Vertical (90°)
+                    </button>
+
+                    <button
+                      onClick={handleAlignSelectedHorizontal}
+                      disabled={!selectedAnnotationId}
+                      className={`py-1.5 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                        selectedAnnotationId
+                          ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-slate-500'
+                          : 'bg-slate-800/40 text-slate-500 border border-slate-800 cursor-not-allowed'
+                      }`}
+                      title="Alinear la regla seleccionada a 0° (Horizontal)"
+                    >
+                      <MoveHorizontal size={13} />
+                      Horizontal (0°)
+                    </button>
+                  </div>
+
+                  {/* Manual Millimeter Micro-Adjustment */}
+                  {selectedAnnotationId && (
+                    <div className="bg-slate-950/90 p-2 rounded-lg border border-cyan-500/40 space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-cyan-300 flex items-center gap-1">
+                          <Scale size={12} /> Ajuste Manual de Medida:
+                        </span>
+                        <span className="text-[10px] text-cyan-400 font-mono font-bold">
+                          {directMmInput || '0'} mm
+                        </span>
+                      </div>
+                      
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleStepRulerLength(-0.1)}
+                          className="flex-1 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-xs font-bold transition-all cursor-pointer"
+                          title="Disminuir 0.1 mm (o flecha Abajo ↓)"
+                        >
+                          -0.1 mm
+                        </button>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          value={directMmInput}
+                          onChange={(e) => {
+                            setDirectMmInput(e.target.value);
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val) && val > 0) {
+                              handleSetSelectedRulerLength(val);
+                            }
+                          }}
+                          className="w-16 px-1 py-1 bg-slate-900 border border-cyan-500/60 rounded text-center text-xs font-bold text-cyan-300 focus:outline-none focus:border-cyan-400 font-mono"
+                          placeholder="mm"
+                        />
+                        <button
+                          onClick={() => handleStepRulerLength(0.1)}
+                          className="flex-1 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-xs font-bold transition-all cursor-pointer"
+                          title="Aumentar 0.1 mm (o flecha Arriba ↑)"
+                        >
+                          +0.1 mm
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-1 pt-0.5">
+                        <button
+                          onClick={() => handleStepRulerLength(-1.0)}
+                          className="flex-1 py-0.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded text-[10px] font-semibold transition-all cursor-pointer border border-slate-800"
+                          title="Disminuir 1 mm (Shift + ↓)"
+                        >
+                          -1.0 mm
+                        </button>
+                        <button
+                          onClick={() => handleStepRulerLength(1.0)}
+                          className="flex-1 py-0.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded text-[10px] font-semibold transition-all cursor-pointer border border-slate-800"
+                          title="Aumentar 1 mm (Shift + ↑)"
+                        >
+                          +1.0 mm
+                        </button>
+                      </div>
+
+                      <p className="text-[9.5px] text-slate-400 leading-tight pt-0.5">
+                        ⌨️ <strong className="text-cyan-300">Teclas ↑ / ↓</strong>: Ajusta ±0.1 mm. <br />
+                        <strong className="text-cyan-300">Shift + ↑ / ↓</strong>: Ajusta ±1.0 mm.
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      setIsVerticalLocked(prev => !prev);
+                      setEditorMessage(!isVerticalLocked ? '↕ Bloqueo Vertical ACTIVADO: Las reglas se ajustarán a 90°' : '↕ Bloqueo Vertical DESACTIVADO');
+                      setTimeout(() => setEditorMessage(null), 3000);
+                    }}
+                    className={`w-full py-1.5 px-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer border ${
+                      isVerticalLocked
+                        ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-extrabold shadow-sm'
+                        : 'bg-slate-800/60 hover:bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+                    }`}
+                    title="Activar/desactivar bloqueo vertical de reglas (también puedes mantener presionado Shift mientras arrastras)"
+                  >
+                    <MoveVertical size={13} />
+                    {isVerticalLocked ? '↕ Bloqueo Vertical ACTIVADO' : '↕ Activar Bloqueo Vertical (90°)'}
+                  </button>
 
                   <button
                     onClick={handleAlignForeheadRuler}
@@ -5020,6 +5974,68 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
             {/* TAB 1: LANDMARK GUIDE TABLE FOR RADIOGRAPH PLACEMENT */}
             {cephSidebarView === 'guide_table' && (
               <div className="space-y-3">
+                {/* Manual Placement & AI Training Control Panel */}
+                <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 p-3 rounded-2xl border border-slate-800 space-y-2 text-white shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Target size={14} className="text-cyan-400" />
+                      Modo de Colocación & Aprendizaje IA
+                    </span>
+                    <span className="text-[10px] bg-slate-800 text-cyan-300 font-mono font-bold px-2 py-0.5 rounded-full border border-slate-700">
+                      {Object.keys(landmarks).length} / 25 colocados
+                    </span>
+                  </div>
+
+                  <p className="text-[11px] text-slate-300 leading-snug">
+                    Coloca los puntos anatómicos manualmente haciendo clic en la radiografía. Luego pulsa <b>"Entrenar IA"</b> para que el modelo aprenda tu criterio exacto.
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-1.5 pt-1">
+                    <button
+                      onClick={() => {
+                        if (isManualPlacing) {
+                          setIsManualPlacing(false);
+                          setEditorMessage('Modo manual pausado.');
+                        } else {
+                          handleStartManualPlacement();
+                        }
+                      }}
+                      className={`py-2 px-2.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm ${
+                        isManualPlacing
+                          ? 'bg-cyan-500 text-slate-950 ring-2 ring-cyan-300 font-black'
+                          : 'bg-slate-800 text-cyan-300 border border-slate-700 hover:bg-slate-750'
+                      }`}
+                    >
+                      <Target size={13} />
+                      <span>{isManualPlacing ? '🎯 Manual ACTIVO' : '🎯 Colocar Manual'}</span>
+                    </button>
+
+                    <button
+                      onClick={handleSaveAILearningModel}
+                      className="py-2 px-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                    >
+                      <GraduationCap size={13} />
+                      <span>🧠 Entrenar IA</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
+                    <button
+                      onClick={handleClearAllLandmarks}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 size={11} />
+                      <span>Limpiar todos los puntos</span>
+                    </button>
+                    {hasLearnedModel && (
+                      <span className="text-[10px] text-emerald-400 flex items-center gap-1 font-bold">
+                        <CheckCircle2 size={11} />
+                        Criterio IA Calibrado ({learnedModelDate})
+                      </span>
+                    )}
+                  </div>
+                </div>
+
                 {/* Search & Category Filter Bar */}
                 <div className="bg-slate-900 p-3 rounded-2xl border border-slate-800 space-y-2">
                   <div className="flex items-center justify-between">
@@ -6074,6 +7090,90 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
         </div>
       )}
 
+      {/* AI CONTINUOUS LEARNING CONFIRMATION MODAL */}
+      {showLearnedModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 text-white border-2 border-cyan-500/60 rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 p-5 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-white/20 rounded-2xl backdrop-blur-xs shadow-inner">
+                  <Brain size={26} className="text-white" />
+                </div>
+                <div>
+                  <h3 className="font-black text-base tracking-wide text-white">
+                    ¡Criterio Anatómico Aprendido!
+                  </h3>
+                  <p className="text-xs text-amber-100 font-medium">
+                    Calibración de Inteligencia Artificial Personalizada
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowLearnedModal(false)}
+                className="p-1 text-white/80 hover:text-white rounded-xl hover:bg-white/10 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-4 text-xs">
+              <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 space-y-2">
+                <div className="flex justify-between items-center text-[11px] pb-2 border-b border-slate-700">
+                  <span className="text-slate-400">Puntos Registrados:</span>
+                  <span className="font-mono font-bold text-cyan-300">
+                    {Object.keys(landmarks).length} / 25 Puntos Anatómicos
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-[11px] pb-2 border-b border-slate-700">
+                  <span className="text-slate-400">Fecha de Registro:</span>
+                  <span className="font-mono font-bold text-amber-300">
+                    {learnedModelDate || new Date().toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-slate-400">Estado del Motor IA:</span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold text-[10px]">
+                    ● Modelo Calibrado Activo
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2 text-slate-300 leading-relaxed bg-cyan-950/30 border border-cyan-500/30 p-4 rounded-2xl">
+                <p className="font-semibold text-cyan-200 text-xs flex items-center gap-1.5">
+                  <Sparkles size={14} className="text-cyan-400" />
+                  ¿Cómo funciona el aprendizaje?
+                </p>
+                <p className="text-[11px]">
+                  A partir de ahora, cada vez que ejecutes <b>"Colocar Puntos con IA"</b>, el motor de visión y análisis cefalométrico incorporará tu posición manual exacta de cada punto como criterio de referencia preferido, ajustando los ángulos diagnósticos de Steiner, Ricketts, McNamara y UPCH a tu criterio clínico.
+                </p>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-slate-800 bg-slate-950 flex items-center justify-end gap-2.5">
+              <button
+                onClick={() => {
+                  setShowLearnedModal(false);
+                  handleRunAILandmarkDetection(true);
+                }}
+                className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl text-xs shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <Sparkles size={13} />
+                <span>Probar Detección con Modelo Calibrado</span>
+              </button>
+              <button
+                onClick={() => setShowLearnedModal(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs transition-all cursor-pointer"
+              >
+                Continuar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* HIDDEN PRINTABLE A4 CONTAINER FOR HIGH-RES PDF EXPORT */}
       <div className="fixed -top-[9999px] -left-[9999px] pointer-events-none" aria-hidden="true">
         <div
@@ -6223,6 +7323,92 @@ export default function XRayEditor({ study, patientName, onSave, isDarkMode = tr
             onAutoAlignRuler={handleAlignForeheadRuler}
             onCloseModal={() => setShowCalibrationModal(false)}
           />
+        </div>
+      )}
+
+      {/* 2-POINT SCALE CALIBRATION MODAL */}
+      {show2PointModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-cyan-500/40 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95">
+            <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+              <div className="p-2.5 bg-cyan-500/20 text-cyan-400 rounded-xl border border-cyan-500/40">
+                <Crosshair size={22} />
+              </div>
+              <div>
+                <h3 className="text-white font-bold text-sm">Calibrar Escala por 2 Puntos</h3>
+                <p className="text-slate-400 text-xs">Ajusta el multiplicador en milímetros de la regla con precisión.</p>
+              </div>
+            </div>
+
+            <div className="space-y-3.5 bg-slate-950 p-4 rounded-xl border border-slate-800">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-400 font-medium">Distancia medida en la imagen:</span>
+                <span className="text-cyan-400 font-mono font-bold text-sm">
+                  {calib2Points.length >= 2 
+                    ? `${Math.round(Math.hypot(calib2Points[1].x - calib2Points[0].x, calib2Points[1].y - calib2Points[0].y) * 10) / 10} px`
+                    : '0 px'}
+                </span>
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <label className="text-xs font-bold text-cyan-200 block">
+                  Ingrese la distancia real conocida en milímetros (mm):
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    value={calibKnownMm}
+                    onChange={(e) => setCalibKnownMm(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-cyan-500/50 text-white font-mono font-bold text-center text-sm py-2 px-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                    placeholder="10.0"
+                    autoFocus
+                  />
+                  <span className="text-cyan-400 font-bold text-xs pr-1">mm</span>
+                </div>
+              </div>
+
+              {/* Quick reference distance chips */}
+              <div className="space-y-1.5 pt-1">
+                <span className="text-[10px] text-slate-400 font-semibold block">Selección rápida común:</span>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {['10.0', '20.0', '50.0', '100.0'].map((val) => (
+                    <button
+                      key={val}
+                      onClick={() => setCalibKnownMm(val)}
+                      className={`py-1.5 text-xs font-mono font-bold rounded-lg border transition-all cursor-pointer ${
+                        calibKnownMm === val
+                          ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-sm'
+                          : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                      }`}
+                    >
+                      {val} mm
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => {
+                  setShow2PointModal(false);
+                  setCalib2Points([]);
+                }}
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl transition-all cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleApply2PointCalibration}
+                className="flex-1 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <CheckCircle size={14} />
+                <span>Aplicar Calibración Real</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
